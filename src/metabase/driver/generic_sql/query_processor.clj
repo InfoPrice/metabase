@@ -15,7 +15,10 @@
              [annotate :as annotate]
              [interface :as i]
              [util :as qputil]]
-            [metabase.util.honeysql-extensions :as hx])
+            [metabase.util.honeysql-extensions :as hx]
+            [clj-time
+             [core :as time]
+             [format :as tformat]])
   (:import clojure.lang.Keyword
            [java.sql ResultSet ResultSetMetaData SQLException]
            [java.util Calendar TimeZone]
@@ -348,13 +351,60 @@
       {:query  sql
        :params args})))
 
+(def ^:private date-time-no-t (clj-time.format/formatter "yyyy-MM-dd HH:mm:ss"))
+(def ^:private date-time-with-millis-no-t (clj-time.format/formatter "yyyy-MM-dd HH:mm:ss.SSS"))
+
+(def ^:private ordered-date-parsers
+  "When using clj-time.format/parse without a formatter, it tries all
+  default formatters, but not ordered by how likely the date
+  formatters will succeed. This leads to very slow parsing as many
+  attempts fail before the right one is found. Using this retains that
+  flexibility but improves performance by trying the most likely ones
+  first"
+  (let [most-likely-default-formatters [:basic-date-time :basic-date-time-no-ms :date-time :date-time-no-ms]]
+    (concat [date-time-no-t date-time-with-millis-no-t]
+            (map tformat/formatters most-likely-default-formatters)
+            (vals (dissoc tformat/formatters most-likely-default-formatters)))))
+
+(defn- parse-date
+  "Like clj-time.format/parse but uses an ordered list of parsers to
+  be faster. Returns the parsed date or nil if it was unable to be
+  parsed."
+  [^TimeZone tz ^String date-str]
+  (let [^DateTimeZone dtz (time/time-zone-for-id (.getID tz))]
+    (first
+     (for [formatter ordered-date-parsers
+           :let [formatter-with-tz (tformat/with-zone formatter dtz)
+                 parsed-date (u/ignore-exceptions (tformat/parse formatter-with-tz date-str))]
+           :when parsed-date]
+       parsed-date))))
+
+(defn- parse-date-as-string
+  "Most databases will never invoke this code. It's possible with
+  SQLite to get here if the timestamp was stored without
+  milliseconds. Currently the SQLite JDBC driver will throw an
+  exception even though the SQLite datetime functions will return
+  datetimes that don't include milliseconds. This attempts to parse
+  that datetime in Clojure land"
+  [^TimeZone tz ^ResultSet rs ^Integer i]
+  (let [date-string (.getString rs i)]
+    (if-let [parsed-date (parse-date tz date-string)]
+      parsed-date
+      (throw (Exception. (format "Unable to parse date '%s'" date-string))))))
+
 (defn- get-date [^TimeZone tz]
   (fn [^ResultSet rs ^ResultSetMetaData rsmeta ^Integer i]
-    (.getDate rs i (Calendar/getInstance tz))))
+    (try
+      (.getDate rs i (Calendar/getInstance tz))
+      (catch SQLException e
+        (parse-date-as-string tz rs i)))))
 
 (defn- get-timestamp [^TimeZone tz]
   (fn [^ResultSet rs ^ResultSetMetaData rsmeta ^Integer i]
-    (.getTimestamp rs i (Calendar/getInstance tz))))
+    (try
+      (.getTimestamp rs i (Calendar/getInstance tz))
+      (catch SQLException e
+        (parse-date-as-string tz rs i)))))
 
 (defn- get-object [^ResultSet rs _ ^Integer i]
   (.getObject rs i))

@@ -8,8 +8,7 @@
   (:import metabase.driver.sqlite.SQLiteDriver))
 
 (defn- database->connection-details [context dbdef]
-  {:db                 (str (i/escaped-name dbdef) ".sqlite")
-   :date_string_format "yyyy-MM-dd HH:mm:ss"})
+  {:db (str (i/escaped-name dbdef) ".sqlite")})
 
 (def ^:private ^:const field-base-type->sql-type
   {:type/BigInteger "BIGINT"
